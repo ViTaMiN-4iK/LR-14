@@ -69,13 +69,21 @@ class ArrowClient:
 
 
 class NATSConsumer:
-    """Consumer for receiving data from NATS JetStream"""
+    """Consumer for receiving data from NATS JetStream with sliding window processing"""
 
-    def __init__(self, nats_url: str = "nats://localhost:4222"):
+    def __init__(self, nats_url: str = "nats://localhost:4222", window_seconds: int = 30):
         self.nats_url = nats_url
         self.client = None
         self.data: List[Dict[str, Any]] = []
         self.subscriptions = []
+
+        # Sliding window configuration
+        self.window_seconds = window_seconds
+        self.window_data: List[Dict[str, Any]] = []
+        self.window_timestamps: List[float] = []
+
+        # Aggregation state for window
+        self.window_aggregates = {}
 
     async def connect(self):
         if not NATS_AVAILABLE:
@@ -90,6 +98,76 @@ class NATSConsumer:
             print(f"Failed to connect to NATS: {e}")
             return False
 
+    def _update_sliding_window(self, data: Dict[str, Any]):
+        """Update sliding window with new data point"""
+        current_time = time.time()
+
+        # Add new data point
+        self.window_data.append(data)
+        self.window_timestamps.append(current_time)
+
+        # Remove expired data points (outside window)
+        cutoff_time = current_time - self.window_seconds
+        while self.window_timestamps and self.window_timestamps[0] < cutoff_time:
+            self.window_data.pop(0)
+            self.window_timestamps.pop(0)
+
+        # Update aggregations
+        self._compute_window_aggregates()
+
+    def _compute_window_aggregates(self):
+        """Compute aggregate statistics for current window"""
+        if not self.window_data:
+            self.window_aggregates = {
+                "count": 0,
+                "patient_ids": set(),
+                "sensor_types": set()
+            }
+            return
+
+        patient_ids = set()
+        sensor_types = set()
+        pulse_values = []
+        temp_values = []
+        spo2_values = []
+
+        for record in self.window_data:
+            patient_ids.add(record.get("patient_id", "unknown"))
+            sensor_type = record.get("sensor_type", "unknown")
+            sensor_types.add(sensor_type)
+
+            if sensor_type == "pulse":
+                pulse_values.append(record.get("value", 0))
+            elif sensor_type == "temperature":
+                temp_values.append(record.get("value", 0))
+            elif sensor_type == "spo2":
+                spo2_values.append(record.get("value", 0))
+
+        self.window_aggregates = {
+            "count": len(self.window_data),
+            "window_duration": self.window_timestamps[-1] - self.window_timestamps[0] if len(self.window_timestamps) > 1 else 0,
+            "patient_ids": list(patient_ids),
+            "sensor_types": list(sensor_types),
+            "pulse": {
+                "count": len(pulse_values),
+                "avg": sum(pulse_values) / len(pulse_values) if pulse_values else 0,
+                "min": min(pulse_values) if pulse_values else None,
+                "max": max(pulse_values) if pulse_values else None,
+            } if pulse_values else None,
+            "temperature": {
+                "count": len(temp_values),
+                "avg": sum(temp_values) / len(temp_values) if temp_values else 0,
+                "min": min(temp_values) if temp_values else None,
+                "max": max(temp_values) if temp_values else None,
+            } if temp_values else None,
+            "spo2": {
+                "count": len(spo2_values),
+                "avg": sum(spo2_values) / len(spo2_values) if spo2_values else 0,
+                "min": min(spo2_values) if spo2_values else None,
+                "max": max(spo2_values) if spo2_values else None,
+            } if spo2_values else None,
+        }
+
     async def subscribe(self, subject: str = "medical.readings"):
         if not self.client:
             print("NATS client not connected")
@@ -99,7 +177,11 @@ class NATSConsumer:
             try:
                 data = json.loads(msg.data.decode())
                 data["_received_at"] = datetime.now().isoformat()
+                data["_received_timestamp"] = time.time()
                 self.data.append(data)
+
+                # Update sliding window
+                self._update_sliding_window(data)
             except Exception as e:
                 print(f"Failed to process message: {e}")
 
@@ -111,12 +193,18 @@ class NATSConsumer:
             print(f"Failed to subscribe: {e}")
 
     async def start_consuming(self):
-        print("Starting NATS consumer (use Ctrl+C to stop)...")
+        print(f"Starting NATS consumer with {self.window_seconds}s sliding window...")
+        print("Use Ctrl+C to stop")
         try:
             while True:
                 await asyncio.sleep(1)
                 if len(self.data) % 100 == 0 and len(self.data) > 0:
-                    print(f"Received {len(self.data)} messages so far...")
+                    print(f"Received {len(self.data)} messages, window: {self.window_aggregates.get('count', 0)} records")
+                    # Print window stats periodically
+                    if self.window_aggregates.get("count", 0) > 0:
+                        pulse = self.window_aggregates.get("pulse")
+                        if pulse:
+                            print(f"  Window pulse: avg={pulse['avg']:.1f}, min={pulse['min']}, max={pulse['max']}")
         except asyncio.CancelledError:
             pass
 
@@ -129,8 +217,19 @@ class NATSConsumer:
     def get_data(self) -> List[Dict[str, Any]]:
         return self.data
 
+    def get_window_data(self) -> List[Dict[str, Any]]:
+        """Get data within current sliding window"""
+        return self.window_data.copy()
+
+    def get_window_aggregates(self) -> Dict[str, Any]:
+        """Get aggregate statistics for current window"""
+        return self.window_aggregates.copy()
+
     def clear_data(self):
         self.data = []
+        self.window_data = []
+        self.window_timestamps = []
+        self.window_aggregates = {}
 
 
 class JSONDataProcessor:
