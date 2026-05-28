@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-analyzer
+  namespace: medical-monitoring
+  labels:
+    app: python-analyzer
+    component: analyzer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python-analyzer
+  template:
+    metadata:
+      labels:
+        app: python-analyzer
+        component: analyzer
+    spec:
+      containers:
+      - name: analyzer
+        image: python-analyzer:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: DATA_DIR
+          value: "/data"
+        - name: NATS_URL
+          value: "nats://nats:4222"
+        - name: ETCD_URL
+          value: "http://etcd:2379"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
