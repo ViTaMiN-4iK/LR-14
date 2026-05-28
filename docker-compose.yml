@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js"]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    environment:
+      - ETCD_NAME=etcd
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+    ports:
+      - "2379:2379"
+
+  streamlit:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./python/dashboard:/app/dashboard
+    depends_on:
+      - nats
+    environment:
+      - NATS_URL=nats://nats:4222
+    command: streamlit run dashboard/app.py --server.address 0.0.0.0
+
+volumes:
+  data:
